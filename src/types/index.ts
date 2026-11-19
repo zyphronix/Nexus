@@ -85,6 +85,8 @@ export type GeneratedTask = {
   estimatedHours?: number;
   storyPoints?: number;
   tags?: string[];
+  dependsOnTaskIndices?: number[];
+  generationIndex?: number;
 };
 
 export type TaskGenerationRequest = {

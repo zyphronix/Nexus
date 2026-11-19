@@ -1,14 +1,20 @@
 'use server';
 
 import { db } from '@/core/db/client';
-import { githubConnections } from '@/core/db/schema';
-import { eq } from 'drizzle-orm';
-import { getAuthUser } from '@/core/auth';
+import { githubConnections, githubTaskMatches, tasks } from '@/core/db/schema';
+import { and, desc, eq } from 'drizzle-orm';
+import { getAuthUser, requireRole } from '@/core/auth';
 import { createOctokit } from './lib/octokit';
 import { indexRepo } from './lib/indexer';
 import { matchCommitToTasks } from './lib/commit-matcher';
 import { deleteAllCodeChunks } from '@/modules/rag/code-sync';
 import { updateTask } from '@/core/db/queries/tasks';
+import {
+  createIndexingJob,
+  getIndexingJobById,
+  getIndexingJobs as dbGetIndexingJobs,
+  updateIndexingJob,
+} from '@/core/db/queries';
 import type { ApiResponse } from '@/types';
 
 export type ConnectionStatus = {
@@ -24,7 +30,8 @@ export async function getConnectionStatus(
   projectId: string
 ): Promise<ApiResponse<ConnectionStatus>> {
   try {
-    await getAuthUser();
+    const user = await getAuthUser();
+    await requireRole(user.id, projectId, 'member');
     const [conn] = await db
       .select()
       .from(githubConnections)
@@ -65,7 +72,8 @@ export async function listUserRepos(
   projectId: string
 ): Promise<ApiResponse<RepoSummary[]>> {
   try {
-    await getAuthUser();
+    const user = await getAuthUser();
+    await requireRole(user.id, projectId, 'member');
     const [conn] = await db
       .select()
       .from(githubConnections)
@@ -101,7 +109,8 @@ export async function selectRepo(
   name: string
 ): Promise<ApiResponse<{ filesIndexed: number; chunksIndexed: number; tasksAutoClosed: number }>> {
   try {
-    await getAuthUser();
+    const user = await getAuthUser();
+    await requireRole(user.id, projectId, 'admin');
     const [conn] = await db
       .select()
       .from(githubConnections)
@@ -166,7 +175,6 @@ export async function selectRepo(
         per_page: 100,
       });
 
-      const user = await getAuthUser();
       const closedSet = new Set<string>();
 
       for (const c of commits.data) {
@@ -182,10 +190,32 @@ export async function selectRepo(
             commitMessage: c.commit.message,
             filesChanged,
           });
-          for (const taskId of matched) {
-            if (closedSet.has(taskId)) continue;
-            await updateTask(taskId, { status: 'done' }, user.id);
-            closedSet.add(taskId);
+          for (const match of matched) {
+            if (match.confidence >= 0.9) {
+              if (closedSet.has(match.taskId)) continue;
+              await updateTask(match.taskId, { status: 'done' }, user.id);
+              closedSet.add(match.taskId);
+              await db.insert(githubTaskMatches).values({
+                id: crypto.randomUUID(),
+                projectId,
+                commitSha: c.sha,
+                taskId: match.taskId,
+                confidence: Math.round(match.confidence * 100),
+                reason: match.reason,
+                status: 'auto_closed',
+                reviewedAt: new Date(),
+              });
+            } else {
+              await db.insert(githubTaskMatches).values({
+                id: crypto.randomUUID(),
+                projectId,
+                commitSha: c.sha,
+                taskId: match.taskId,
+                confidence: Math.round(match.confidence * 100),
+                reason: match.reason,
+                status: 'pending',
+              });
+            }
           }
         } catch (err) {
           console.warn('[github] Backfill commit failed:', err);
@@ -215,7 +245,8 @@ export async function disconnectGithub(
   projectId: string
 ): Promise<ApiResponse<void>> {
   try {
-    await getAuthUser();
+    const user = await getAuthUser();
+    await requireRole(user.id, projectId, 'admin');
     const [conn] = await db
       .select()
       .from(githubConnections)
@@ -249,8 +280,28 @@ export async function triggerReindex(
   projectId: string
 ): Promise<ApiResponse<{ filesIndexed: number; chunksIndexed: number }>> {
   try {
-    await getAuthUser();
-    const result = await indexRepo(projectId);
+    const user = await getAuthUser();
+    await requireRole(user.id, projectId, 'admin');
+    const job = await createIndexingJob({ projectId, jobType: 'manual_full' });
+    await updateIndexingJob(job.id, { status: 'running', startedAt: new Date() });
+    let result;
+    try {
+      result = await indexRepo(projectId);
+      await updateIndexingJob(job.id, {
+        status: 'completed',
+        totalFiles: result.filesIndexed + result.filesSkipped,
+        processedFiles: result.filesIndexed,
+        failedFiles: result.filesSkipped,
+        completedAt: new Date(),
+      });
+    } catch (error) {
+      await updateIndexingJob(job.id, {
+        status: 'failed',
+        errorMessage: error instanceof Error ? error.message : 'Reindex failed',
+        completedAt: new Date(),
+      });
+      throw error;
+    }
     return {
       success: true,
       data: { filesIndexed: result.filesIndexed, chunksIndexed: result.chunksIndexed },
@@ -259,6 +310,114 @@ export async function triggerReindex(
     console.error('Failed to reindex:', error);
     const message = error instanceof Error ? error.message : 'Reindex failed';
     return { success: false, error: message };
+  }
+}
+
+export async function getIndexingJobHistory(
+  projectId: string,
+): Promise<ApiResponse<Awaited<ReturnType<typeof dbGetIndexingJobs>>>> {
+  try {
+    const user = await getAuthUser();
+    await requireRole(user.id, projectId, 'member');
+    return { success: true, data: await dbGetIndexingJobs(projectId) };
+  } catch (error) {
+    console.error('Failed to fetch indexing jobs:', error);
+    return { success: false, error: 'Failed to fetch indexing jobs' };
+  }
+}
+
+export async function retryIndexingJob(
+  jobId: string,
+): Promise<ApiResponse<{ filesIndexed: number; chunksIndexed: number }>> {
+  try {
+    const user = await getAuthUser();
+    const job = await getIndexingJobById(jobId);
+    if (!job) return { success: false, error: 'Indexing job not found' };
+    await requireRole(user.id, job.projectId, 'admin');
+
+    await updateIndexingJob(job.id, {
+      status: 'running',
+      errorMessage: null,
+      startedAt: new Date(),
+      completedAt: null,
+    });
+    try {
+      const result = await indexRepo(job.projectId);
+      await updateIndexingJob(job.id, {
+        status: 'completed',
+        totalFiles: result.filesIndexed + result.filesSkipped,
+        processedFiles: result.filesIndexed,
+        failedFiles: result.filesSkipped,
+        completedAt: new Date(),
+      });
+      return { success: true, data: { filesIndexed: result.filesIndexed, chunksIndexed: result.chunksIndexed } };
+    } catch (error) {
+      await updateIndexingJob(job.id, {
+        status: 'failed',
+        errorMessage: error instanceof Error ? error.message : 'Retry failed',
+        completedAt: new Date(),
+      });
+      throw error;
+    }
+  } catch (error) {
+    console.error('Failed to retry indexing job:', error);
+    return { success: false, error: error instanceof Error ? error.message : 'Failed to retry indexing job' };
+  }
+}
+
+export async function getPendingTaskMatches(
+  projectId: string,
+): Promise<ApiResponse<Array<typeof githubTaskMatches.$inferSelect & { taskTitle: string }>>> {
+  try {
+    const user = await getAuthUser();
+    await requireRole(user.id, projectId, 'member');
+    const matches = await db
+      .select({ match: githubTaskMatches, taskTitle: tasks.title })
+      .from(githubTaskMatches)
+      .innerJoin(tasks, eq(githubTaskMatches.taskId, tasks.id))
+      .where(and(eq(githubTaskMatches.projectId, projectId), eq(githubTaskMatches.status, 'pending')))
+      .orderBy(desc(githubTaskMatches.createdAt));
+    return { success: true, data: matches.map(({ match, taskTitle }) => ({ ...match, taskTitle })) };
+  } catch (error) {
+    console.error('Failed to fetch pending task matches:', error);
+    return { success: false, error: 'Failed to fetch pending task matches' };
+  }
+}
+
+export async function reviewTaskMatch(input: {
+  projectId: string;
+  matchId: string;
+  decision: 'approve' | 'reject';
+}): Promise<ApiResponse<void>> {
+  try {
+    const user = await getAuthUser();
+    await requireRole(user.id, input.projectId, 'admin');
+    const [match] = await db
+      .select()
+      .from(githubTaskMatches)
+      .where(
+        and(
+          eq(githubTaskMatches.id, input.matchId),
+          eq(githubTaskMatches.projectId, input.projectId),
+          eq(githubTaskMatches.status, 'pending'),
+        ),
+      );
+    if (!match) return { success: false, error: 'Pending match not found' };
+
+    if (input.decision === 'approve') {
+      await updateTask(match.taskId, { status: 'done' }, user.id);
+    }
+    await db
+      .update(githubTaskMatches)
+      .set({
+        status: input.decision === 'approve' ? 'approved' : 'rejected',
+        reviewedAt: new Date(),
+      })
+      .where(eq(githubTaskMatches.id, input.matchId));
+    return { success: true };
+  } catch (error) {
+    console.error('Failed to review task match:', error);
+    return { success: false, error: 'Failed to review task match' };
   }
 }
 
@@ -272,7 +431,8 @@ export async function getFileTree(
   projectId: string
 ): Promise<ApiResponse<FileTreeNode[]>> {
   try {
-    await getAuthUser();
+    const user = await getAuthUser();
+    await requireRole(user.id, projectId, 'member');
     const [conn] = await db
       .select()
       .from(githubConnections)
@@ -315,7 +475,8 @@ export async function getFileContent(
   filepath: string
 ): Promise<ApiResponse<{ content: string; language: string }>> {
   try {
-    await getAuthUser();
+    const user = await getAuthUser();
+    await requireRole(user.id, projectId, 'member');
     const [conn] = await db
       .select()
       .from(githubConnections)

@@ -6,3 +6,6 @@ export * from './analytics';
 export * from './agent';
 export * from './roadmap';
 export * from './invites';
+export * from './dependencies';
+export * from './indexing-jobs';
+export * from './ai-evaluations';

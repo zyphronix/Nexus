@@ -1,7 +1,7 @@
 'use server';
 
 import type { AnalyticsData, DateRangeFilter, ApiResponse } from '@/types';
-import { getAuthUser } from '@/core/auth';
+import { getAuthUser, requireRole } from '@/core/auth';
 import {
   getProjectMetrics,
   getTaskDistribution,
@@ -58,7 +58,8 @@ export async function getAnalytics(
   dateRange: DateRangeFilter
 ): Promise<ApiResponse<AnalyticsData>> {
   try {
-    await getAuthUser();
+    const user = await getAuthUser();
+    await requireRole(user.id, projectId, 'member');
 
     const days =
       dateRange === '7d' ? 7 : dateRange === '30d' ? 30 : dateRange === '90d' ? 90 : 180;
@@ -93,7 +94,8 @@ export async function generateNarrative(
   dateRange: DateRangeFilter
 ): Promise<ApiResponse<string>> {
   try {
-    await getAuthUser();
+    const user = await getAuthUser();
+    await requireRole(user.id, projectId, 'member');
 
     const [analyticsResult, contextData] = await Promise.all([
       getAnalytics(projectId, dateRange),
@@ -133,7 +135,8 @@ export async function generateSuggestions(
   dateRange: DateRangeFilter
 ): Promise<ApiResponse<string>> {
   try {
-    await getAuthUser();
+    const user = await getAuthUser();
+    await requireRole(user.id, projectId, 'member');
 
     const [analyticsResult, contextData] = await Promise.all([
       getAnalytics(projectId, dateRange),

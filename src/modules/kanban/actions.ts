@@ -8,6 +8,7 @@ import type { CreateTaskInput, UpdateTaskInput, ApiResponse } from '@/types';
 import { getAuthUser, requireRole } from '@/core/auth';
 import {
   getTasksByProject,
+  getTaskById,
   getTaskEventsByTaskId,
   createTask as dbCreateTask,
   updateTask as dbUpdateTask,
@@ -32,6 +33,12 @@ export async function getTaskEvents(
   taskId: string
 ): Promise<ApiResponse<TaskEventWithUser[]>> {
   try {
+    const user = await getAuthUser();
+    const task = await getTaskById(taskId);
+    if (!task) {
+      return { success: false, error: 'Task not found' };
+    }
+    await requireRole(user.id, task.projectId, 'member');
     const events = await getTaskEventsByTaskId(taskId);
     return { success: true, data: events };
   } catch (error) {

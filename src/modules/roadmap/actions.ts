@@ -1,7 +1,7 @@
 'use server';
 
-import type { ApiResponse, ImplementationPlan, PlanSection } from '@/types';
-import { getAuthUser } from '@/core/auth';
+import type { ApiResponse, ImplementationPlan } from '@/types';
+import { getAuthUser, requireRole } from '@/core/auth';
 import {
   getActivePlan as dbGetActivePlan,
   getPlanHistory as dbGetPlanHistory,
@@ -9,7 +9,6 @@ import {
   updatePlan as dbUpdatePlan,
   updatePlanSection as dbUpdatePlanSection,
   getPlanById,
-  getActivePlanContent as dbGetActivePlanContent,
 } from '@/core/db/queries';
 import { getProjectById } from '@/core/db/queries';
 import { generateImplementationPlan, regeneratePhase, refinePlanWithPrompt } from './plan-generator';
@@ -22,7 +21,8 @@ export async function getImplementationPlan(
   projectId: string
 ): Promise<ApiResponse<ImplementationPlan>> {
   try {
-    await getAuthUser();
+    const user = await getAuthUser();
+    await requireRole(user.id, projectId, 'member');
     const plan = await dbGetActivePlan(projectId);
     if (!plan) {
       return { success: false, error: 'No implementation plan found' };
@@ -38,7 +38,8 @@ export async function getPlanVersionHistory(
   projectId: string
 ): Promise<ApiResponse<ImplementationPlan[]>> {
   try {
-    await getAuthUser();
+    const user = await getAuthUser();
+    await requireRole(user.id, projectId, 'member');
     const history = await dbGetPlanHistory(projectId);
     return { success: true, data: history };
   } catch (error) {
@@ -61,6 +62,7 @@ export async function generatePlanWithAI(
 ): Promise<ApiResponse<ImplementationPlan>> {
   try {
     const user = await getAuthUser();
+    await requireRole(user.id, projectId, 'member');
 
     const result = await generateImplementationPlan({
       projectName: details.name,
@@ -99,6 +101,7 @@ export async function refinePlanWithAI(
 ): Promise<ApiResponse<ImplementationPlan>> {
   try {
     const user = await getAuthUser();
+    await requireRole(user.id, projectId, 'member');
     const project = await getProjectById(projectId);
     const currentPlan = await dbGetActivePlan(projectId);
 
@@ -145,6 +148,7 @@ export async function uploadPlan(
 ): Promise<ApiResponse<ImplementationPlan>> {
   try {
     const user = await getAuthUser();
+    await requireRole(user.id, projectId, 'member');
     const sections = parsePlanToSections(content);
 
     const plan = await dbCreatePlan({
@@ -177,6 +181,7 @@ export async function updateImplementationPlan(
 ): Promise<ApiResponse<ImplementationPlan>> {
   try {
     const user = await getAuthUser();
+    await requireRole(user.id, projectId, 'member');
     const sections = parsePlanToSections(content);
 
     const plan = await dbUpdatePlan({
@@ -208,20 +213,25 @@ export async function updatePlanSectionAction(
   newItems: string[]
 ): Promise<ApiResponse<ImplementationPlan>> {
   try {
-    await getAuthUser();
-    const plan = await dbUpdatePlanSection(planId, sectionId, newContent, newItems);
+    const user = await getAuthUser();
+    const plan = await getPlanById(planId);
     if (!plan) {
+      return { success: false, error: 'Plan not found' };
+    }
+    await requireRole(user.id, plan.projectId, 'member');
+    const updatedPlan = await dbUpdatePlanSection(planId, sectionId, newContent, newItems);
+    if (!updatedPlan) {
       return { success: false, error: 'Plan not found' };
     }
 
     // Re-vectorize just this section
     try {
-      await upsertSingleSectionVector(plan, sectionId);
+      await upsertSingleSectionVector(updatedPlan, sectionId);
     } catch (err) {
       console.warn('Failed to re-vectorize section (non-blocking):', err);
     }
 
-    return { success: true, data: plan };
+    return { success: true, data: updatedPlan };
   } catch (error) {
     console.error('Failed to update plan section:', error);
     return { success: false, error: 'Failed to update plan section' };
@@ -237,6 +247,7 @@ export async function regeneratePhaseWithAI(
 ): Promise<ApiResponse<ImplementationPlan>> {
   try {
     const user = await getAuthUser();
+    await requireRole(user.id, projectId, 'member');
     const project = await getProjectById(projectId);
     const currentPlan = await dbGetActivePlan(projectId);
 

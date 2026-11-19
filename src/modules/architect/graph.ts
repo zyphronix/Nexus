@@ -118,7 +118,8 @@ const TASK_JSON_SCHEMA = `{
       "description": "string (detailed, with acceptance criteria)",
       "priority": "low" | "medium" | "high",
       "storyPoints": number (Fibonacci: 1, 2, 3, 5, 8, 13),
-      "tags": ["string"] (e.g., "backend", "frontend", "database")
+      "tags": ["string"] (e.g., "backend", "frontend", "database"),
+      "dependsOnTaskIndices": [number] (zero-based indices of earlier tasks)
     }
   ],
   "reasoning": "string (architectural reasoning for the task breakdown)"
@@ -134,6 +135,18 @@ const CRITIQUE_JSON_SCHEMA = `{
   ],
   "overallAssessment": "acceptable" | "needs_revision"
 }`;
+
+function sanitizeArchitectOutput(output: ArchitectOutputType): ArchitectOutputType {
+  return {
+    ...output,
+    tasks: output.tasks.map((task, index) => ({
+      ...task,
+      dependsOnTaskIndices: [...new Set(task.dependsOnTaskIndices ?? [])].filter(
+        (dependencyIndex) => dependencyIndex >= 0 && dependencyIndex < index,
+      ),
+    })),
+  };
+}
 
 // ─── Helper: Build context string ────────────────────────────────────────────
 
@@ -168,7 +181,9 @@ async function planNode(state: ArchitectState): Promise<Partial<ArchitectState>>
   const userMessage = `Requirement: ${state.requirement}${context}${critiqueNote}\n\nDecompose this requirement into actionable development tasks. Respond with JSON only.`;
 
   const raw = await callLLM(systemPrompt, userMessage);
-  const parsed = ArchitectOutputSchema.parse(JSON.parse(extractJSON(raw)));
+  const parsed = sanitizeArchitectOutput(
+    ArchitectOutputSchema.parse(JSON.parse(extractJSON(raw))),
+  );
 
   return {
     plan: parsed,
@@ -199,7 +214,9 @@ async function finalizeNode(
   const userMessage = `Requirement: ${state.requirement}${context}\n\nPlan:\n${JSON.stringify(state.plan, null, 2)}\n\nCritique:\n${JSON.stringify(state.critique, null, 2)}\n\nProduce the final, polished task breakdown addressing all feedback. Respond with JSON only.`;
 
   const raw = await callLLM(systemPrompt, userMessage);
-  const parsed = ArchitectOutputSchema.parse(JSON.parse(extractJSON(raw)));
+  const parsed = sanitizeArchitectOutput(
+    ArchitectOutputSchema.parse(JSON.parse(extractJSON(raw))),
+  );
 
   return { finalTasks: parsed };
 }

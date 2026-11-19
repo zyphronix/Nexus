@@ -12,6 +12,20 @@ function safeNext(raw: FormDataEntryValue | null): string {
   return '/dashboard'
 }
 
+function normalizeAuthErrorMessage(error: { message?: string; status?: number } | null | undefined, fallback: string): string {
+  const message = error?.message?.toLowerCase() || ''
+
+  if (message.includes('unsupported provider') || message.includes('provider is not enabled')) {
+    return 'Google sign-in is not enabled in Supabase Auth. Enable the Google provider in your Supabase dashboard.'
+  }
+
+  if (message.includes('rate limit') || message.includes('email rate limit')) {
+    return 'Email sign-up is temporarily rate-limited. Wait a few minutes and try again, or use a different email address.'
+  }
+
+  return fallback
+}
+
 export async function login(formData: FormData) {
   const supabase = await createClient()
   const next = safeNext(formData.get('next'))
@@ -48,7 +62,8 @@ export async function signInWithGoogle(formData: FormData) {
 
   if (error) {
     console.error("Google Login Error:", error)
-    redirect(`/sign-in?error=${encodeURIComponent(error.message || 'Could not authenticate with Google')}`)
+    const message = normalizeAuthErrorMessage(error, 'Could not authenticate with Google')
+    redirect(`/sign-in?error=${encodeURIComponent(message)}`)
   }
 
   if (data.url) {
@@ -78,7 +93,9 @@ export async function signup(formData: FormData) {
 
   if (error) {
     console.error("Supabase Signup Error:", error)
-    const qs = new URLSearchParams({ error: error.message || 'Could not authenticate user' })
+    const qs = new URLSearchParams({
+      error: normalizeAuthErrorMessage(error, 'Could not authenticate user'),
+    })
     if (next !== '/dashboard') qs.set('next', next)
     redirect(`/sign-up?${qs.toString()}`)
   }

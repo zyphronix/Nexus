@@ -7,6 +7,7 @@ import {
   saveChatMessage,
   clearChatHistory as dbClearChatHistory,
   consumeChatRateLimit,
+  createAiEvaluation,
 } from '@/core/db/queries';
 import { generateChatCompletion } from '@/core/ai/chat';
 import { retrieveRelevantTasks } from '@/modules/rag/retriever';
@@ -215,6 +216,21 @@ export async function sendChatMessage(
         errorStatus: false,
       },
     });
+
+    try {
+      await createAiEvaluation({
+        projectId,
+        featureType: 'chat',
+        sourceId: assistantMsg.id,
+        inputText: message,
+        actualOutput: completion.content,
+        latencyMs: completion.latencyMs,
+        model: completion.model,
+        notes: 'Automatically captured; grounding and relevance scores are pending review.',
+      });
+    } catch (evaluationError) {
+      console.warn('Failed to record chat evaluation sample:', evaluationError);
+    }
 
     console.info('chat_completion', {
       projectId,

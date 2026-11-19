@@ -21,6 +21,10 @@ export const TaskSchema = z.object({
   tags: z
     .array(z.string())
     .describe('Relevant tags, e.g. ["backend", "api", "auth"]'),
+  dependsOnTaskIndices: z
+    .array(z.number().int().nonnegative())
+    .default([])
+    .describe('Zero-based indices of earlier tasks that must be completed first'),
 });
 
 export type TaskSchemaType = z.infer<typeof TaskSchema>;

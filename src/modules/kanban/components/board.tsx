@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState } from 'react';
 import { createPortal } from 'react-dom';
 import {
   DndContext,
@@ -23,6 +23,7 @@ import { Column } from './column';
 import { Card } from './card';
 import { TaskModal } from './task-modal';
 import { CreateTaskForm } from './create-task-form';
+import { DependencyGraph } from './dependency-graph';
 import {
   Dialog,
   DialogContent,
@@ -190,6 +191,8 @@ export function Board({ projectId }: BoardProps) {
           </motion.div>
         ))}
       </section>
+
+      <DependencyGraph projectId={projectId} tasks={tasks} />
 
       {typeof document !== 'undefined' && createPortal(
         <DragOverlay

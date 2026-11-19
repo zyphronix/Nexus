@@ -11,10 +11,10 @@ import { getAuthUser, requireRole } from '@/core/auth';
 import {
   saveGeneration,
   getGenerationHistory as dbGetGenerationHistory,
-  updateGenerationAcceptedCount,
 } from '@/core/db/queries';
 import { bulkCreateTasks } from '@/core/db/queries';
 import { getProjectById } from '@/core/db/queries';
+import { addTaskDependency, createAiEvaluation } from '@/core/db/queries';
 import { runArchitectGraph } from '@/modules/architect/graph';
 import { retrieveRelevantTasks } from '@/modules/rag/retriever';
 
@@ -88,6 +88,7 @@ export async function generateTasks(
     ].filter(Boolean).join('');
 
     // Run the LangGraph architect agent
+    const generationStartedAt = Date.now();
     const architectResult = await runArchitectGraph({
       requirement: request.requirement,
       projectName: project?.name,
@@ -100,18 +101,34 @@ export async function generateTasks(
 
 
     // Map architect output to the existing GeneratedTask format
-    const generatedTasks: GeneratedTask[] = architectResult.tasks.map((t) => ({
+    const generatedTasks: GeneratedTask[] = architectResult.tasks.map((t, generationIndex) => ({
       title: t.title,
       description: t.description,
       priority: t.priority,
       storyPoints: t.storyPoints,
       tags: t.tags,
+      dependsOnTaskIndices: t.dependsOnTaskIndices,
+      generationIndex,
     }));
 
     const result: TaskGenerationResponse = {
       tasks: generatedTasks,
       reasoning: architectResult.reasoning,
     };
+
+    try {
+      await createAiEvaluation({
+        projectId: request.projectId,
+        featureType: 'architect',
+        inputText: request.requirement,
+        actualOutput: JSON.stringify(result),
+        latencyMs: Date.now() - generationStartedAt,
+        model: process.env.AI_PROVIDER || 'configured-provider',
+        notes: 'Automatically captured; task quality and duplicate checks are pending review.',
+      });
+    } catch (evaluationError) {
+      console.warn('Failed to record architect evaluation sample:', evaluationError);
+    }
 
     // Persist the generation record
     await saveGeneration({
@@ -159,6 +176,27 @@ export async function acceptGeneratedTasks(
       })),
       user.id
     );
+
+    const acceptedIndexToTaskId = new Map(
+      tasks.map((task, index) => [task.generationIndex ?? index, createdTasks[index].id]),
+    );
+
+    for (let index = 0; index < tasks.length; index += 1) {
+      const task = tasks[index];
+      const taskId = createdTasks[index]?.id;
+      if (!taskId) continue;
+
+      for (const dependencyIndex of task.dependsOnTaskIndices ?? []) {
+        const dependsOnTaskId = acceptedIndexToTaskId.get(dependencyIndex);
+        if (!dependsOnTaskId || dependsOnTaskId === taskId) continue;
+        await addTaskDependency({
+          projectId,
+          taskId,
+          dependsOnTaskId,
+          userId: user.id,
+        });
+      }
+    }
 
     return { success: true, data: createdTasks };
   } catch (error) {

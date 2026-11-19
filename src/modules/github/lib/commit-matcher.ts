@@ -2,17 +2,18 @@ import { db } from '@/core/db/client';
 import { tasks } from '@/core/db/schema';
 import { and, eq, ne } from 'drizzle-orm';
 import { generateChatCompletion } from '@/core/ai/chat';
+import { createAiEvaluation } from '@/core/db/queries';
 
 const SYSTEM_PROMPT = `You are an assistant that links Git commits to project tasks.
-You will be given a commit message, the list of files it changed, and a list of OPEN tasks (each with id, title, description).
-Your job: decide which tasks (if any) this commit completes.
-
+You will be given a commit message, changed files, and OPEN tasks.
+Return only JSON in this exact shape:
+{"matches":[{"taskId":"id1","confidence":0.0,"reason":"short explanation"}]}
 Rules:
-- A commit completes a task only if the change clearly delivers what the task asks for.
-- If unsure, do NOT include the task.
-- Respond with ONLY valid JSON in this exact shape: {"taskIds": ["id1", "id2"]}
-- Return an empty array if no task is completed.
-- Do NOT wrap in markdown. Do NOT add commentary.`;
+- Include a task only when the commit clearly delivers what the task asks for.
+- Use confidence from 0 to 1.
+- Use high confidence (0.90+) only when the evidence is explicit.
+- If unsure, return an empty matches array.
+- Do not wrap JSON in markdown or add commentary.`;
 
 export type CommitMatchInput = {
   projectId: string;
@@ -20,9 +21,16 @@ export type CommitMatchInput = {
   filesChanged: string[];
 };
 
+export type CommitTaskMatch = {
+  taskId: string;
+  confidence: number;
+  reason: string;
+};
+
 export async function matchCommitToTasks(
   input: CommitMatchInput
-): Promise<string[]> {
+): Promise<CommitTaskMatch[]> {
+  const startedAt = Date.now();
   // Load open tasks (status != done)
   const openTasks = await db
     .select({
@@ -62,24 +70,67 @@ Which tasks does this commit complete? Respond with JSON only.`;
       history: [],
       systemPrompt: SYSTEM_PROMPT,
     });
-  } catch (err) {
-    console.warn('[commit-matcher] LLM call failed:', err);
+  } catch (error) {
+    console.warn('[commit-matcher] LLM call failed:', error);
     return [];
   }
 
-  // Extract JSON
-  const text = completion.content.trim();
-  const jsonMatch = text.match(/\{[\s\S]*\}/);
+  try {
+    await createAiEvaluation({
+      projectId: input.projectId,
+      featureType: 'commit_matcher',
+      inputText: `${input.commitMessage}\n${input.filesChanged.join('\n')}`,
+      actualOutput: completion.content,
+      latencyMs: Date.now() - startedAt,
+      model: completion.model,
+      notes: 'Automatically captured; match precision requires human review labels.',
+    });
+  } catch (evaluationError) {
+    console.warn('Failed to record commit matcher evaluation sample:', evaluationError);
+  }
+
+  const jsonMatch = completion.content.trim().match(/\{[\s\S]*\}/);
   if (!jsonMatch) return [];
 
   try {
-    const parsed = JSON.parse(jsonMatch[0]) as { taskIds?: unknown };
-    if (!Array.isArray(parsed.taskIds)) return [];
+    const parsed = JSON.parse(jsonMatch[0]) as {
+      matches?: unknown;
+      taskIds?: unknown;
+    };
     const validIds = new Set(openTasks.map((t) => t.id));
-    return parsed.taskIds.filter(
-      (id): id is string => typeof id === 'string' && validIds.has(id)
-    );
-  } catch {
+    if (Array.isArray(parsed.matches)) {
+      return parsed.matches.flatMap((match) => {
+        if (!match || typeof match !== 'object') return [];
+        const candidate = match as Record<string, unknown>;
+        const taskId = candidate.taskId;
+        const confidence = candidate.confidence;
+        if (
+          typeof taskId !== 'string' ||
+          !validIds.has(taskId) ||
+          typeof confidence !== 'number' ||
+          !Number.isFinite(confidence)
+        ) {
+          return [];
+        }
+        return [{
+          taskId,
+          confidence: Math.max(0, Math.min(1, confidence)),
+          reason: typeof candidate.reason === 'string' ? candidate.reason.slice(0, 500) : '',
+        }];
+      });
+    }
+
+    if (Array.isArray(parsed.taskIds)) {
+      return parsed.taskIds.flatMap((taskId) =>
+        typeof taskId === 'string' && validIds.has(taskId)
+          ? [{ taskId, confidence: 1, reason: 'Validated legacy matcher result.' }]
+          : [],
+      );
+    }
+  } catch (error) {
+    console.warn('[commit-matcher] Invalid LLM JSON:', error);
     return [];
   }
+
+  return [];
 }

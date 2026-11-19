@@ -4,8 +4,14 @@ import { useState, useEffect } from 'react';
 import { useUIStore } from '@/stores/ui-store';
 import { useTasksStore } from '@/stores/tasks-store';
 import { updateTask, deleteTask, getTaskEvents } from '@/modules/kanban/actions';
-import type { Task, TaskStatus, TaskPriority } from '@/core/db/schema';
+import {
+  createDependency,
+  deleteDependency,
+  getDependencies,
+} from '@/modules/kanban/dependency-actions';
+import type { TaskStatus, TaskPriority } from '@/core/db/schema';
 import type { TaskEventWithUser } from '@/core/db/queries/tasks';
+import type { TaskDependencyWithTasks } from '@/core/db/queries/dependencies';
 import {
   Dialog,
   DialogContent,
@@ -26,7 +32,17 @@ import {
   SelectValue,
 } from '@/components/ui/select';
 import { toast } from 'sonner';
-import { Clock, User, Calendar, Activity, Trash2, Save, Edit2, X } from 'lucide-react';
+import {
+  Clock,
+  User,
+  Calendar,
+  Activity,
+  Trash2,
+  Save,
+  Edit2,
+  X,
+  GitBranch,
+} from 'lucide-react';
 
 export function TaskModal() {
   const { taskModalOpen, selectedTaskId, closeTaskModal } = useUIStore();
@@ -36,6 +52,9 @@ export function TaskModal() {
   const [isSaving, setIsSaving] = useState(false);
   const [isDeleting, setIsDeleting] = useState(false);
   const [taskEvents, setTaskEvents] = useState<TaskEventWithUser[]>([]);
+  const [projectDependencies, setProjectDependencies] = useState<TaskDependencyWithTasks[]>([]);
+  const [selectedBlockerId, setSelectedBlockerId] = useState('none');
+  const [isDependencySaving, setIsDependencySaving] = useState(false);
   
   // Form state
   const [title, setTitle] = useState('');
@@ -60,6 +79,7 @@ export function TaskModal() {
   useEffect(() => {
     if (!taskModalOpen || !task) {
       setTaskEvents([]);
+      setProjectDependencies([]);
       return;
     }
 
@@ -76,12 +96,72 @@ export function TaskModal() {
       }
     };
 
+    const loadDependencies = async () => {
+      const result = await getDependencies(task.projectId);
+      if (!isMounted) return;
+      setProjectDependencies(result.success && result.data ? result.data : []);
+    };
+
     loadTaskEvents();
+    loadDependencies();
 
     return () => {
       isMounted = false;
     };
   }, [taskModalOpen, task]);
+
+  const taskBlockers = projectDependencies.filter(
+    (dependency) => dependency.task.id === task?.id,
+  );
+
+  const availableBlockers = tasks.filter(
+    (candidate) =>
+      candidate.id !== task?.id &&
+      !taskBlockers.some((dependency) => dependency.dependsOnTask.id === candidate.id),
+  );
+
+  const refreshDependencies = async () => {
+    if (!task) return;
+    const result = await getDependencies(task.projectId);
+    if (result.success && result.data) setProjectDependencies(result.data);
+  };
+
+  const handleAddDependency = async () => {
+    if (!task || selectedBlockerId === 'none') return;
+    setIsDependencySaving(true);
+    const result = await createDependency({
+      projectId: task.projectId,
+      taskId: task.id,
+      dependsOnTaskId: selectedBlockerId,
+    });
+    if (result.success) {
+      setSelectedBlockerId('none');
+      await refreshDependencies();
+      window.dispatchEvent(new Event('task-dependencies-changed'));
+      toast.success('Dependency added');
+    } else {
+      toast.error(result.error || 'Failed to add dependency');
+    }
+    setIsDependencySaving(false);
+  };
+
+  const handleRemoveDependency = async (dependency: TaskDependencyWithTasks) => {
+    if (!task) return;
+    setIsDependencySaving(true);
+    const result = await deleteDependency({
+      projectId: task.projectId,
+      taskId: dependency.task.id,
+      dependsOnTaskId: dependency.dependsOnTask.id,
+    });
+    if (result.success) {
+      await refreshDependencies();
+      window.dispatchEvent(new Event('task-dependencies-changed'));
+      toast.success('Dependency removed');
+    } else {
+      toast.error(result.error || 'Failed to remove dependency');
+    }
+    setIsDependencySaving(false);
+  };
 
   const getEventDescription = (event: TaskEventWithUser) => {
     switch (event.eventType) {
@@ -122,7 +202,7 @@ export function TaskModal() {
       } else {
         toast.error(result.error || 'Failed to update task');
       }
-    } catch (error) {
+    } catch {
       toast.error('An error occurred while updating the task');
     } finally {
       setIsSaving(false);
@@ -143,7 +223,7 @@ export function TaskModal() {
       } else {
         toast.error(result.error || 'Failed to delete task');
       }
-    } catch (error) {
+    } catch {
       toast.error('An error occurred while deleting the task');
     } finally {
       setIsDeleting(false);
@@ -307,6 +387,62 @@ export function TaskModal() {
                   <span>Assignee: {task.assigneeId}</span>
                 </div>
               )}
+            </div>
+          )}
+
+          {!isEditing && (
+            <div className="space-y-3 border-t border-white/20 pt-4 dark:border-white/10">
+              <div className="flex items-center gap-2 font-medium">
+                <GitBranch className="h-4 w-4" />
+                <span>Dependencies</span>
+              </div>
+              <p className="text-xs text-muted-foreground">
+                Add tasks that must be completed before this task can start.
+              </p>
+              <div className="flex gap-2">
+                <Select value={selectedBlockerId} onValueChange={setSelectedBlockerId}>
+                  <SelectTrigger className="flex-1">
+                    <SelectValue placeholder="Select a blocker" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="none">Select a blocker</SelectItem>
+                    {availableBlockers.map((candidate) => (
+                      <SelectItem key={candidate.id} value={candidate.id}>
+                        {candidate.title}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                <Button
+                  variant="outline"
+                  onClick={handleAddDependency}
+                  disabled={isDependencySaving || selectedBlockerId === 'none'}
+                >
+                  Add
+                </Button>
+              </div>
+              <div className="space-y-2">
+                {taskBlockers.map((dependency) => (
+                  <div
+                    key={dependency.id}
+                    className="flex items-center justify-between rounded-lg border border-border/70 bg-background/60 px-3 py-2 text-sm"
+                  >
+                    <span className="truncate">Blocked by {dependency.dependsOnTask.title}</span>
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      onClick={() => handleRemoveDependency(dependency)}
+                      disabled={isDependencySaving}
+                      aria-label={`Remove dependency on ${dependency.dependsOnTask.title}`}
+                    >
+                      <X className="h-4 w-4" />
+                    </Button>
+                  </div>
+                ))}
+                {taskBlockers.length === 0 && (
+                  <p className="text-sm text-muted-foreground">No blockers configured.</p>
+                )}
+              </div>
             </div>
           )}
 

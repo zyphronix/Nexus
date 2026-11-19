@@ -6,7 +6,9 @@ import {
   integer,
   jsonb,
   boolean,
+  index,
   primaryKey,
+  uniqueIndex,
 } from 'drizzle-orm/pg-core';
 import { relations } from 'drizzle-orm';
 
@@ -117,6 +119,32 @@ export const tasks = pgTable('tasks', {
   aiGenerated: boolean('ai_generated').notNull().default(false),
   storyPoints: integer('story_points'),
 });
+
+// A directed edge: taskId cannot start until dependsOnTaskId is complete.
+export const taskDependencies = pgTable(
+  'task_dependencies',
+  {
+    id: text('id').primaryKey(),
+    projectId: text('project_id')
+      .notNull()
+      .references(() => projects.id, { onDelete: 'cascade' }),
+    taskId: text('task_id')
+      .notNull()
+      .references(() => tasks.id, { onDelete: 'cascade' }),
+    dependsOnTaskId: text('depends_on_task_id')
+      .notNull()
+      .references(() => tasks.id, { onDelete: 'cascade' }),
+    createdBy: text('created_by').references(() => users.id, { onDelete: 'set null' }),
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+  },
+  (table) => ({
+    uniqueEdge: uniqueIndex('task_dependencies_unique_edge').on(
+      table.taskId,
+      table.dependsOnTaskId,
+    ),
+    projectIndex: index('task_dependencies_project_id_idx').on(table.projectId),
+  }),
+);
 
 // ─── Task Events ──────────────────────────────────────────────────────────────
 
@@ -259,6 +287,72 @@ export const githubIndexedFiles = pgTable('github_indexed_files', {
   indexedAt: timestamp('indexed_at').defaultNow().notNull(),
 });
 
+export const githubWebhookEvents = pgTable('github_webhook_events', {
+  deliveryId: text('delivery_id').primaryKey(),
+  projectId: text('project_id')
+    .notNull()
+    .references(() => projects.id, { onDelete: 'cascade' }),
+  repository: text('repository').notNull(),
+  eventType: text('event_type').notNull(),
+  commitSha: text('commit_sha'),
+  status: text('status').notNull().default('processing'),
+  errorMessage: text('error_message'),
+  receivedAt: timestamp('received_at').defaultNow().notNull(),
+  processedAt: timestamp('processed_at'),
+});
+
+export const indexingJobs = pgTable('indexing_jobs', {
+  id: text('id').primaryKey(),
+  projectId: text('project_id')
+    .notNull()
+    .references(() => projects.id, { onDelete: 'cascade' }),
+  jobType: text('job_type').notNull(),
+  status: text('status').notNull().default('queued'),
+  commitSha: text('commit_sha'),
+  totalFiles: integer('total_files').notNull().default(0),
+  processedFiles: integer('processed_files').notNull().default(0),
+  failedFiles: integer('failed_files').notNull().default(0),
+  errorMessage: text('error_message'),
+  startedAt: timestamp('started_at'),
+  completedAt: timestamp('completed_at'),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+});
+
+export const githubTaskMatches = pgTable('github_task_matches', {
+  id: text('id').primaryKey(),
+  projectId: text('project_id')
+    .notNull()
+    .references(() => projects.id, { onDelete: 'cascade' }),
+  commitSha: text('commit_sha').notNull(),
+  taskId: text('task_id')
+    .notNull()
+    .references(() => tasks.id, { onDelete: 'cascade' }),
+  confidence: integer('confidence').notNull(),
+  reason: text('reason').notNull(),
+  status: text('status').notNull().default('pending'),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+  reviewedAt: timestamp('reviewed_at'),
+});
+
+export const aiEvaluations = pgTable('ai_evaluations', {
+  id: text('id').primaryKey(),
+  projectId: text('project_id')
+    .notNull()
+    .references(() => projects.id, { onDelete: 'cascade' }),
+  featureType: text('feature_type').notNull(),
+  sourceId: text('source_id'),
+  inputText: text('input_text').notNull(),
+  expectedOutput: text('expected_output'),
+  actualOutput: text('actual_output').notNull(),
+  groundingScore: integer('grounding_score'),
+  relevanceScore: integer('relevance_score'),
+  accepted: boolean('accepted'),
+  latencyMs: integer('latency_ms'),
+  model: text('model'),
+  notes: text('notes'),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+});
+
 // ─── Relations ────────────────────────────────────────────────────────────────
 
 export const usersRelations = relations(users, ({ many }) => ({
@@ -280,6 +374,10 @@ export const projectsRelations = relations(projects, ({ one, many }) => ({
   chatRateLimits: many(chatRateLimits),
   agentGenerations: many(agentGenerations),
   implementationPlans: many(implementationPlans),
+  githubWebhookEvents: many(githubWebhookEvents),
+  indexingJobs: many(indexingJobs),
+  githubTaskMatches: many(githubTaskMatches),
+  aiEvaluations: many(aiEvaluations),
 }));
 
 export const projectMembersRelations = relations(projectMembers, ({ one }) => ({
@@ -303,6 +401,29 @@ export const tasksRelations = relations(tasks, ({ one, many }) => ({
     references: [users.id],
   }),
   events: many(taskEvents),
+  dependencies: many(taskDependencies, { relationName: 'dependentTask' }),
+  blockers: many(taskDependencies, { relationName: 'blockingTask' }),
+}));
+
+export const taskDependenciesRelations = relations(taskDependencies, ({ one }) => ({
+  project: one(projects, {
+    fields: [taskDependencies.projectId],
+    references: [projects.id],
+  }),
+  task: one(tasks, {
+    fields: [taskDependencies.taskId],
+    references: [tasks.id],
+    relationName: 'dependentTask',
+  }),
+  dependsOnTask: one(tasks, {
+    fields: [taskDependencies.dependsOnTaskId],
+    references: [tasks.id],
+    relationName: 'blockingTask',
+  }),
+  creator: one(users, {
+    fields: [taskDependencies.createdBy],
+    references: [users.id],
+  }),
 }));
 
 export const taskEventsRelations = relations(taskEvents, ({ one }) => ({
@@ -376,6 +497,7 @@ export type ProjectInvitation = typeof projectInvitations.$inferSelect;
 export type MemberRole = (typeof memberRoleEnum.enumValues)[number];
 export type InvitationStatus = (typeof invitationStatusEnum.enumValues)[number];
 export type Task = typeof tasks.$inferSelect;
+export type TaskDependency = typeof taskDependencies.$inferSelect;
 export type TaskEvent = typeof taskEvents.$inferSelect;
 export type ChatMessageRecord = typeof chatMessages.$inferSelect;
 export type ChatMessageMetric = typeof chatMessageMetrics.$inferSelect;
@@ -384,6 +506,10 @@ export type AgentGeneration = typeof agentGenerations.$inferSelect;
 export type ImplementationPlan = typeof implementationPlans.$inferSelect;
 export type GithubConnection = typeof githubConnections.$inferSelect;
 export type GithubIndexedFile = typeof githubIndexedFiles.$inferSelect;
+export type GithubWebhookEvent = typeof githubWebhookEvents.$inferSelect;
+export type IndexingJob = typeof indexingJobs.$inferSelect;
+export type GithubTaskMatch = typeof githubTaskMatches.$inferSelect;
+export type AiEvaluation = typeof aiEvaluations.$inferSelect;
 export type TaskStatus = (typeof taskStatusEnum.enumValues)[number];
 export type TaskPriority = (typeof taskPriorityEnum.enumValues)[number];
 export type EventType = (typeof eventTypeEnum.enumValues)[number];

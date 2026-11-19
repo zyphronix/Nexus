@@ -8,6 +8,7 @@ import { PriorityChart } from './priority-chart';
 import { MemberPerformanceComponent } from './member-performance';
 import { DateRangeFilterComponent } from './date-range-filter';
 import { NarrativePanel } from './narrative-panel';
+import { EvaluationPanel } from './evaluation-panel';
 import { useAnalytics } from '../hooks/use-analytics';
 import type { DateRangeFilter } from '@/types';
 import { 
@@ -76,6 +77,8 @@ export function DashboardContainer({ projectId }: DashboardContainerProps) {
           dateRange={dateRange}
           hasData={!!data}
         />
+
+        <EvaluationPanel projectId={projectId} />
 
         {/* Charts Grid */}
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">

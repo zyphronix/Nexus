@@ -593,7 +593,109 @@ npm run start:all
 
 ---
 
-## Slide 17: Results, Validation, and Future Work
+## Slide 17: Redis Chat Request Queue
+
+### Previous chat behavior
+
+Chat completion was synchronous inside the Next.js server action.
+
+### New queued chat flow
+
+```text
+User message
+    ↓
+Save in PostgreSQL
+    ↓
+Redis user/project rate limit
+    ↓
+Assemble board + roadmap + code context
+    ↓
+BullMQ ai-processing job
+    ↓
+AI worker completion
+    ↓
+Assistant message + metrics saved
+    ↓
+UI polls and reloads history
+```
+
+### Benefits
+
+- Non-blocking chat HTTP requests
+- Retryable AI completions
+- Worker isolation
+- Durable chat and telemetry records
+- Multiple users can queue safely
+
+---
+
+## Slide 18: Redis Architect Task Queue
+
+### Previous behavior
+
+LangGraph Planner/Critic/Finalizer executed synchronously.
+
+### New queued behavior
+
+```text
+Requirement + roadmap + tasks + code
+              ↓
+Architect Redis limit
+              ↓
+ai-processing queue
+              ↓
+AI worker
+              ↓
+Planner → Critic → Finalizer
+              ↓
+Zod validation
+              ↓
+agent_generations in PostgreSQL
+              ↓
+Client polling
+              ↓
+Generated task UI
+```
+
+### Benefits
+
+- Expensive planning work runs outside request lifecycle
+- Independent Architect rate limits
+- Retryable graph execution
+- Persistent generation history
+- Queue status can be polled by the UI
+
+---
+
+## Slide 19: Redis AI-Provider and Chat Throttling
+
+### Three Redis limit scopes
+
+| Limit | Redis key scope |
+|---|---|
+| Chat | `userId + projectId` |
+| Architect | `userId + projectId` |
+| AI provider | Provider-wide |
+
+### Example provider key
+
+```text
+nexus:ai-provider:gemini
+```
+
+### Protected operations
+
+- Chat completion
+- Commit matching
+- Insight and narrative generation
+- Architect LangGraph calls
+- Other OpenAI-compatible completion calls
+
+This prevents one project or burst of chat requests from consuming provider capacity without coordination.
+
+---
+
+## Slide 20: Results, Validation, and Future Work
 
 ### Current implementation results
 
@@ -604,7 +706,10 @@ npm run start:all
 - Webhook replay protection
 - Durable indexing job history and retry
 - AI evaluation records and dashboard
-- BullMQ Redis queue and worker operational
+- GitHub BullMQ queue and worker operational
+- Chat BullMQ queue and worker operational
+- Architect BullMQ queue and worker operational
+- Redis chat, Architect, and provider-wide throttling operational
 - 9 automated tests passing
 - TypeScript validation passing
 - Drizzle migration checks passing

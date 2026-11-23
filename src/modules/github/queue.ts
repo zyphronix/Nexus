@@ -1,5 +1,5 @@
 import { Queue } from 'bullmq';
-import { getRedisConnection } from '@/core/queue/redis';
+import { createQueueJobId, getRedisConnection } from '@/core/queue/redis';
 
 export const GITHUB_QUEUE_NAME = 'github-indexing';
 
@@ -50,12 +50,12 @@ export function getGitHubQueue(): Queue<GitHubQueueJobData> {
 
 export async function enqueueGitHubPush(data: GitHubPushJobData) {
   return getGitHubQueue().add('github-push', data, {
-    jobId: `push:${data.deliveryId}`,
+    jobId: createQueueJobId('push', data.deliveryId),
   });
 }
 
 export async function enqueueFullGitHubIndex(data: GitHubFullIndexJobData) {
   return getGitHubQueue().add('github-full-index', data, {
-    jobId: `full:${data.indexingJobId}`,
+    jobId: createQueueJobId('full', data.indexingJobId),
   });
 }

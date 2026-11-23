@@ -99,6 +99,8 @@ export type TaskGenerationRequest = {
 export type TaskGenerationResponse = {
   tasks: GeneratedTask[];
   reasoning: string;
+  jobId?: string;
+  status?: 'queued' | 'active' | 'completed' | 'failed';
 };
 
 // Analytics Types

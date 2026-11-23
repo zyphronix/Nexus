@@ -23,8 +23,8 @@ export async function retrieveRelevantPlanSections(
   const client = getQdrantClient();
   const queryVector = await generateEmbedding(query);
 
-  const results = await client.search(ROADMAP_COLLECTION_NAME, {
-    vector: queryVector,
+  const response = await client.query(ROADMAP_COLLECTION_NAME, {
+    query: queryVector,
     limit: topK,
     filter: {
       must: [{ key: 'project_id', match: { value: projectId } }],
@@ -33,7 +33,7 @@ export async function retrieveRelevantPlanSections(
     score_threshold: 0.3,
   });
 
-  return results.map((r) => ({
+  return response.points.map((r) => ({
     phase: r.payload?.phase as string,
     phaseNumber: r.payload?.phase_number as number,
     sectionType: r.payload?.section_type as string,

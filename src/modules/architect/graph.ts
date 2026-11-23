@@ -1,4 +1,5 @@
 import { StateGraph, Annotation, END } from '@langchain/langgraph';
+import { consumeRedisFixedWindowLimit } from '@/core/redis/rate-limit';
 import { architectPrompts } from './prompts';
 import {
   ArchitectOutputSchema,
@@ -37,6 +38,7 @@ function getLLMConfig() {
 
   if (provider === 'gemini') {
     return {
+      provider,
       apiKey: process.env.GEMINI_API_KEY || '',
       baseUrl:
         process.env.GEMINI_BASE_URL ||
@@ -46,6 +48,7 @@ function getLLMConfig() {
   }
 
   return {
+    provider,
     apiKey: process.env.OPENAI_API_KEY || '',
     baseUrl: process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1',
     model: process.env.OPENAI_CHAT_MODEL || 'gpt-4o-mini',
@@ -62,37 +65,68 @@ async function callLLM(
     throw new Error('AI provider is not configured. Set the appropriate API key.');
   }
 
-  const response = await fetch(`${config.baseUrl}/chat/completions`, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${config.apiKey}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({
-      model: config.model,
-      messages: [
-        { role: 'system', content: systemPrompt },
-        { role: 'user', content: userMessage },
-      ],
-      temperature: 0.3,
-    }),
+  const providerRateLimit = await consumeRedisFixedWindowLimit({
+    key: `nexus:ai-provider:${config.provider}`,
+    limit: Number(process.env.AI_PROVIDER_RATE_LIMIT_REQUESTS || 30),
+    windowSeconds: Number(process.env.AI_PROVIDER_RATE_LIMIT_WINDOW_SECONDS || 60),
   });
-
-  if (!response.ok) {
-    const body = await response.text();
-    throw new Error(`LLM request failed (${response.status}): ${body}`);
+  if (!providerRateLimit.allowed) {
+    throw new Error(`AI provider rate limit exceeded. Retry after ${providerRateLimit.retryAfterSeconds} seconds.`);
   }
 
-  const payload = (await response.json()) as {
-    choices?: Array<{ message?: { content?: string } }>;
-  };
+  const maxAttempts = 3;
+  let lastError: Error | null = null;
 
-  const content = payload.choices?.[0]?.message?.content?.trim();
-  if (!content) {
-    throw new Error('LLM response did not include content.');
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+    try {
+      const response = await fetch(`${config.baseUrl}/chat/completions`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${config.apiKey}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          model: config.model,
+          messages: [
+            { role: 'system', content: systemPrompt },
+            { role: 'user', content: userMessage },
+          ],
+          temperature: 0.3,
+        }),
+      });
+
+      if (!response.ok) {
+        const body = await response.text();
+        const error = new Error(`LLM request failed (${response.status}): ${body}`);
+        if ([429, 500, 502, 503].includes(response.status) && attempt < maxAttempts - 1) {
+          await new Promise((resolve) => setTimeout(resolve, 3000 * 2 ** attempt));
+          continue;
+        }
+        throw error;
+      }
+
+      const payload = (await response.json()) as {
+        choices?: Array<{ message?: { content?: string } }>;
+      };
+
+      const content = payload.choices?.[0]?.message?.content?.trim();
+      if (!content) {
+        throw new Error('LLM response did not include content.');
+      }
+
+      return content;
+    } catch (error) {
+      lastError = error instanceof Error ? error : new Error('LLM request failed');
+      if (!/503|502|500|429|timeout|unavailable/i.test(lastError.message)) {
+        throw lastError;
+      }
+      if (attempt < maxAttempts - 1) {
+        await new Promise((resolve) => setTimeout(resolve, 3000 * 2 ** attempt));
+      }
+    }
   }
 
-  return content;
+  throw lastError || new Error('LLM request failed after retries');
 }
 
 // ─── JSON Parsing Helper ─────────────────────────────────────────────────────

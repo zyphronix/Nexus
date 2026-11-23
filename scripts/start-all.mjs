@@ -128,10 +128,13 @@ async function main() {
 
   // Start BullMQ worker and Next.js dev server
   log('app', 'Starting GitHub queue worker...');
-  const worker = runProcess('npx', ['tsx', 'scripts/github-worker.ts'], 'app');
+  const githubWorker = runProcess('npx', ['tsx', 'scripts/github-worker.ts'], 'app');
+
+  log('app', 'Starting AI queue worker...');
+  const aiWorker = runProcess('npx', ['tsx', 'scripts/ai-worker.ts'], 'app');
 
   log('app', 'Starting Next.js dev server...');
-  const app = runProcess('npx', ['next', 'dev'], 'app');
+  const app = runProcess('npm', ['run', 'dev'], 'app');
 
   // Wait for app to be ready, then trigger RAG backfill
   log('rag', 'Waiting for app to start before RAG backfill...');
@@ -146,7 +149,11 @@ async function main() {
       const res = await fetch(`${APP_URL}/api/rag/backfill`);
       if (res.ok) {
         const data = await res.json();
-        log('ok', `Backfill done: ${data.success}/${data.total} tasks synced`);
+        if (data.skipped) {
+          log('ok', `Backfill skipped: ${data.synced}/${data.total} task vectors already synced`);
+        } else {
+          log('ok', `Backfill done: ${data.success}/${data.total} tasks synced (${data.failed ?? 0} failed)`);
+        }
       } else {
         log('err', `Backfill failed with status ${res.status}`);
       }
@@ -164,7 +171,8 @@ async function main() {
   // Handle shutdown
   const cleanup = () => {
     log('app', 'Shutting down...');
-    worker.kill();
+    githubWorker.kill();
+    aiWorker.kill();
     app.kill();
     process.exit(0);
   };

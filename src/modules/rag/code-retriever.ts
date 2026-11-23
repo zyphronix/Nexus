@@ -17,8 +17,8 @@ export async function retrieveRelevantCodeChunks(
   const client = getQdrantClient();
   const queryVector = await generateEmbedding(query);
 
-  const results = await client.search(CODE_COLLECTION_NAME, {
-    vector: queryVector,
+  const response = await client.query(CODE_COLLECTION_NAME, {
+    query: queryVector,
     limit: topK,
     filter: {
       must: [{ key: 'project_id', match: { value: filter.projectId } }],
@@ -27,7 +27,7 @@ export async function retrieveRelevantCodeChunks(
     score_threshold: 0.3,
   });
 
-  return results.map((r) => ({
+  return response.points.map((r) => ({
     filepath: (r.payload?.filepath as string) ?? '',
     text: (r.payload?.text as string) ?? '',
     language: (r.payload?.language as string) ?? '',

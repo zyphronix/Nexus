@@ -6,18 +6,18 @@ export function useAgent(projectId: string) {
   const [isGenerating, setIsGenerating] = useState(false);
   const [currentGeneration, setCurrentGeneration] = useState<TaskGenerationResponse | null>(null);
   const [history, setHistory] = useState<Array<{ requirement: string; result: TaskGenerationResponse }>>([]);
-
   const generate = async (requirement: string) => {
     setIsGenerating(true);
     const result = await generateTasks({ projectId, requirement });
-    setIsGenerating(false);
 
     if (result.success && result.data) {
+      setIsGenerating(false);
       setCurrentGeneration(result.data);
       setHistory((prev) => [...prev, { requirement, result: result.data! }]);
       return result.data;
     }
 
+    setIsGenerating(false);
     return null;
   };
 

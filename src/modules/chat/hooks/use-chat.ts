@@ -1,6 +1,6 @@
 import { useEffect } from 'react';
 import { useChatStore } from '@/stores/chat-store';
-import { loadChatHistory, sendChatMessage } from '../actions';
+import { getChatJobStatus, loadChatHistory, sendChatMessage } from '../actions';
 
 export function useChat(projectId: string) {
   const { getConversation, addMessage, setConversation, isLoading, setLoading } = useChatStore();
@@ -42,6 +42,21 @@ export function useChat(projectId: string) {
 
     if (result.data) {
       addMessage(projectId, result.data);
+
+      const pollJob = window.setInterval(async () => {
+        const status = await getChatJobStatus(projectId, result.data!.id);
+        if (!status.success || !status.data) return;
+
+        if (status.data.state === 'completed') {
+          window.clearInterval(pollJob);
+          const history = await loadChatHistory(projectId);
+          if (history.success && history.data) setConversation(projectId, history.data);
+        } else if (status.data.state === 'failed') {
+          window.clearInterval(pollJob);
+          const history = await loadChatHistory(projectId);
+          if (history.success && history.data) setConversation(projectId, history.data);
+        }
+      }, 1200);
     }
   };
 

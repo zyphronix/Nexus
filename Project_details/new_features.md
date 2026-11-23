@@ -858,6 +858,178 @@ BullMQ automatically retries failed queue jobs with exponential backoff. The dat
 
 This advancement separates short-lived HTTP requests from long-running repository work. GitHub webhooks now return immediately after queue insertion, while a worker provides durable retries and processing isolation.
 
+# 12B. Redis Chat Request Queue
+
+## 12B.1 Previous behavior
+
+Chat responses were generated synchronously inside the Next.js server-action request.
+
+This caused the browser request to remain open until:
+
+- RAG context was assembled
+- The provider returned a completion
+- Tool/model retries finished
+- PostgreSQL telemetry was saved
+
+## 12B.2 New behavior
+
+Chat now uses the `ai-processing` BullMQ queue.
+
+```text
+User sends message
+      ↓
+Save user message in PostgreSQL
+      ↓
+Apply Redis user/project rate limit
+      ↓
+Assemble board + roadmap + code context
+      ↓
+Enqueue typed chat job
+      ↓
+Return queued placeholder immediately
+      ↓
+AI worker performs completion
+      ↓
+Worker saves assistant message + metrics
+      ↓
+Client polls job status
+      ↓
+Client reloads persisted chat history
+```
+
+## 12B.3 Job data
+
+The chat job contains:
+
+- Project ID
+- User ID
+- User message
+- Recent conversation history
+- System prompt with board/Roadmap/GitHub context
+- Unique job ID
+
+## 12B.4 Reliability
+
+The chat queue uses:
+
+- 3 attempts
+- Exponential backoff
+- 100 completed jobs retained
+- 200 failed jobs retained
+- 2 worker concurrent operations
+
+The chat worker saves success/failure output to PostgreSQL rather than keeping the response only in Redis.
+
+## 12B.5 Redis rate limiting
+
+Chat requests use an atomic fixed-window Lua/Redis `INCR` operation keyed by:
+
+```text
+nexus:chat-rate:<userId>:<projectId>
+```
+
+This prevents concurrent chat submissions from bypassing the chat limit. Redis returns:
+
+- Allowed state
+- Remaining requests
+- Retry-after TTL
+
+# 12C. Redis Architect Task-Generation Queue
+
+## 12C.1 Previous behavior
+
+Architect generation ran synchronously through the server action while the LangGraph Planner/Critic/Finalizer graph called the AI provider.
+
+## 12C.2 New behavior
+
+Architect generation now uses the same `ai-processing` queue:
+
+```text
+User submits requirement
+      ↓
+Check Architect Redis limit
+      ↓
+Retrieve roadmap + existing tasks + code context
+      ↓
+Enqueue Architect job
+      ↓
+Return queued status immediately
+      ↓
+AI worker runs LangGraph
+      ↓
+Zod validates final JSON
+      ↓
+Worker saves agent_generations
+      ↓
+Worker returns result through BullMQ
+      ↓
+UI polls and displays generated tasks
+```
+
+## 12C.3 Architect limits
+
+Architect generation is limited independently by:
+
+```text
+nexus:architect-rate:<userId>:<projectId>
+```
+
+This protects the provider and prevents repeated expensive graph runs.
+
+# 12D. Redis AI-Provider Rate Limiting
+
+A provider-wide Redis fixed-window limit protects all OpenAI-compatible chat completion calls:
+
+```text
+nexus:ai-provider:<provider>
+```
+
+This applies to:
+
+- Chat completions
+- Commit matching
+- AI insights
+- Architect LangGraph calls
+- Other chat-completion utility calls
+
+This is separate from the chat and Architect limits:
+
+| Limit | Scope |
+|---|---|
+| Chat limit | User + project |
+| Architect limit | User + project |
+| Provider limit | Provider-wide |
+
+# 12E. Queue Worker Verification
+
+Redis and both workers can be verified through separate terminals:
+
+```bash
+npm run queue:worker
+npm run ai:worker
+npm run dev
+```
+
+Or combined:
+
+```bash
+npm run start:all
+```
+
+Successful worker output:
+
+```text
+[github-worker] Ready
+[ai-worker] Ready
+```
+
+A chat or Architect job is working when:
+
+- BullMQ reports the job as `completed` or `failed`
+- PostgreSQL contains the assistant message or agent generation
+- The UI replaces queued status with persisted results
+- Worker logs show completion or retry information
+
 # 13. Database Evolution
 
 The original project had 13 relational tables. The current schema includes additional tables for the new features:

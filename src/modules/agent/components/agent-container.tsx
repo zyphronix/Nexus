@@ -100,11 +100,21 @@ export function AgentContainer({ projectId }: AgentContainerProps) {
           </Card>
         )}
 
+        {/* Failed generation state */}
+        {displayedGeneration?.status === 'failed' && (
+          <Card className="p-5 sm:p-6">
+            <div className="space-y-2 text-sm">
+                <p className="font-medium text-destructive">Task generation failed</p>
+                <p className="text-muted-foreground">{displayedGeneration.reasoning}</p>
+            </div>
+          </Card>
+        )}
+
         {/* Generated Tasks */}
-        {displayedGeneration && (
+        {displayedGeneration && (displayedGeneration.tasks?.length ?? 0) > 0 && (
           <Card className="p-5 sm:p-6">
             <GeneratedTasksList
-              tasks={displayedGeneration.tasks}
+              tasks={displayedGeneration.tasks ?? []}
               reasoning={displayedGeneration.reasoning}
               onAccept={handleAcceptTasks}
               isAccepting={isAccepting}

@@ -6,10 +6,9 @@ import {
   getChatMessages as dbGetChatMessages,
   saveChatMessage,
   clearChatHistory as dbClearChatHistory,
-  consumeChatRateLimit,
-  createAiEvaluation,
 } from '@/core/db/queries';
-import { generateChatCompletion } from '@/core/ai/chat';
+import { consumeRedisFixedWindowLimit } from '@/core/redis/rate-limit';
+import { enqueueChatJob, getAIQueue } from '@/core/queue/ai-queue';
 import { retrieveRelevantTasks } from '@/modules/rag/retriever';
 
 const RATE_LIMIT_PER_WINDOW = Number(process.env.CHAT_RATE_LIMIT_REQUESTS || 20);
@@ -39,11 +38,10 @@ export async function sendChatMessage(
     const user = await getAuthUser();
     await requireRole(user.id, projectId, 'member');
 
-    const rateLimit = await consumeChatRateLimit({
-      userId: user.id,
-      projectId,
+    const rateLimit = await consumeRedisFixedWindowLimit({
+      key: `nexus:chat-rate:${user.id}:${projectId}`,
       limit: RATE_LIMIT_PER_WINDOW,
-      windowMinutes: RATE_LIMIT_WINDOW_MINUTES,
+      windowSeconds: RATE_LIMIT_WINDOW_MINUTES * 60,
     });
 
     if (!rateLimit.allowed) {
@@ -159,101 +157,85 @@ export async function sendChatMessage(
 
 
 
-    let completion;
+    const jobId = `chat-${projectId}-${user.id}-${crypto.randomUUID()}`;
     try {
-      completion = await generateChatCompletion({
+      await enqueueChatJob({
+        kind: 'chat',
+        jobId,
+        projectId,
+        userId: user.id,
         message,
         history: historyForModel,
         systemPrompt,
       });
     } catch (error) {
-      const fallback = 'I could not generate a response right now. Please try again in a moment.';
-      const assistantErrorMsg = await saveChatMessage({
+      const fallback = 'I could not queue a response right now. Please try again in a moment.';
+      await saveChatMessage({
         projectId,
         userId: null,
         role: 'assistant',
         content: fallback,
         metrics: {
           provider: (process.env.AI_PROVIDER || 'openai').toLowerCase(),
-          model: process.env.OPENAI_CHAT_MODEL || 'unknown',
+          model: process.env.AI_CHAT_MODEL || 'unknown',
           prompt: message,
           response: fallback,
           latencyMs: 0,
-          retryCount: Number(process.env.AI_MAX_RETRIES || 2),
+          retryCount: 0,
           errorStatus: true,
-          errorMessage: error instanceof Error ? error.message : 'Unknown AI error',
+          errorMessage: error instanceof Error ? error.message : 'Queue unavailable',
         },
       });
 
       return {
         success: false,
-        error: toClientError(error),
-        data: {
-          id: assistantErrorMsg.id,
-          role: 'assistant',
-          content: assistantErrorMsg.content,
-          timestamp: assistantErrorMsg.createdAt,
-        },
+        error: 'AI queue is unavailable. Please try again in a moment.',
       };
     }
-
-    // Save AI response and telemetry to DB
-    const assistantMsg = await saveChatMessage({
-      projectId,
-      userId: null,
-      role: 'assistant',
-      content: completion.content,
-      metrics: {
-        provider: completion.provider,
-        model: completion.model,
-        prompt: message,
-        response: completion.content,
-        latencyMs: completion.latencyMs,
-        promptTokens: completion.promptTokens,
-        completionTokens: completion.completionTokens,
-        totalTokens: completion.totalTokens,
-        retryCount: completion.retryCount,
-        errorStatus: false,
-      },
-    });
-
-    try {
-      await createAiEvaluation({
-        projectId,
-        featureType: 'chat',
-        sourceId: assistantMsg.id,
-        inputText: message,
-        actualOutput: completion.content,
-        latencyMs: completion.latencyMs,
-        model: completion.model,
-        notes: 'Automatically captured; grounding and relevance scores are pending review.',
-      });
-    } catch (evaluationError) {
-      console.warn('Failed to record chat evaluation sample:', evaluationError);
-    }
-
-    console.info('chat_completion', {
-      projectId,
-      userId: user.id,
-      provider: completion.provider,
-      model: completion.model,
-      latencyMs: completion.latencyMs,
-      totalTokens: completion.totalTokens,
-      retryCount: completion.retryCount,
-    });
 
     return {
       success: true,
       data: {
-        id: assistantMsg.id,
+        id: jobId,
         role: 'assistant',
-        content: assistantMsg.content,
-        timestamp: assistantMsg.createdAt,
+        content: 'Your response is being generated...',
+        timestamp: new Date(),
       },
     };
   } catch (error) {
     console.error('Failed to send message:', error);
     return { success: false, error: toClientError(error) };
+  }
+}
+
+export async function getChatJobStatus(
+  projectId: string,
+  jobId: string,
+): Promise<ApiResponse<{ state: string; result?: ChatMessage }>> {
+  try {
+    const user = await getAuthUser();
+    await requireRole(user.id, projectId, 'member');
+    const job = await getAIQueue().getJob(jobId);
+    if (!job) return { success: false, error: 'Job not found' };
+    const state = await job.getState();
+    const returnValue = state === 'completed' ? await job.returnvalue : undefined;
+    return {
+      success: true,
+      data: {
+        state,
+        result: returnValue
+          ? {
+              id: returnValue.id,
+              role: 'assistant',
+              content: returnValue.content,
+              timestamp: new Date(returnValue.timestamp),
+            }
+          : undefined,
+      },
+    };
+  } catch (error) {
+    console.error('Failed to get chat job status:', error);
+    return { success: false, error: 'Failed to get chat job status' };
   }
 }
 

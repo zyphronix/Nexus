@@ -1,4 +1,5 @@
 import { getModel, type SupportedModelProvider } from './models';
+import { consumeRedisFixedWindowLimit } from '@/core/redis/rate-limit';
 
 export type ChatCompletionInput = {
   message: string;
@@ -119,6 +120,17 @@ export async function generateChatCompletion(
 
   if (!providerConfig.ready) {
     throw new Error(`AI provider ${provider} is not configured.`);
+  }
+
+  const providerLimit = Number(process.env.AI_PROVIDER_RATE_LIMIT_REQUESTS || 30);
+  const providerWindowSeconds = Number(process.env.AI_PROVIDER_RATE_LIMIT_WINDOW_SECONDS || 60);
+  const providerRateLimit = await consumeRedisFixedWindowLimit({
+    key: `nexus:ai-provider:${provider}`,
+    limit: providerLimit,
+    windowSeconds: providerWindowSeconds,
+  });
+  if (!providerRateLimit.allowed) {
+    throw new Error(`AI provider rate limit exceeded. Retry after ${providerRateLimit.retryAfterSeconds} seconds.`);
   }
 
   const timeoutMs = input.timeoutMs ?? Number(process.env.AI_TIMEOUT_MS || 30000);

@@ -8,15 +8,14 @@ import type {
 } from '@/types';
 import type { Task } from '@/core/db/schema';
 import { getAuthUser, requireRole } from '@/core/auth';
-import {
-  saveGeneration,
-  getGenerationHistory as dbGetGenerationHistory,
-} from '@/core/db/queries';
+import { getGenerationHistory as dbGetGenerationHistory } from '@/core/db/queries';
 import { bulkCreateTasks } from '@/core/db/queries';
+import { saveGeneration, createAiEvaluation } from '@/core/db/queries';
 import { getProjectById } from '@/core/db/queries';
-import { addTaskDependency, createAiEvaluation } from '@/core/db/queries';
-import { runArchitectGraph } from '@/modules/architect/graph';
+import { addTaskDependency } from '@/core/db/queries';
 import { retrieveRelevantTasks } from '@/modules/rag/retriever';
+import { runArchitectGraph } from '@/modules/architect/graph';
+import { consumeRedisFixedWindowLimit } from '@/core/redis/rate-limit';
 
 /**
  * Generate tasks from a requirement using the LangGraph architect agent.
@@ -87,7 +86,18 @@ export async function generateTasks(
       planContext ? `\n\nImplementation Plan / Roadmap:\n${planContext}` : '',
     ].filter(Boolean).join('');
 
-    // Run the LangGraph architect agent
+    const architectRateLimit = await consumeRedisFixedWindowLimit({
+      key: `nexus:architect-rate:${user.id}:${request.projectId}`,
+      limit: Number(process.env.ARCHITECT_RATE_LIMIT_REQUESTS || 5),
+      windowSeconds: Number(process.env.ARCHITECT_RATE_LIMIT_WINDOW_SECONDS || 300),
+    });
+    if (!architectRateLimit.allowed) {
+      return {
+        success: false,
+        error: `Architect generation limit reached. Retry after ${architectRateLimit.retryAfterSeconds} seconds.`,
+      };
+    }
+
     const generationStartedAt = Date.now();
     const architectResult = await runArchitectGraph({
       requirement: request.requirement,
@@ -99,15 +109,13 @@ export async function generateTasks(
       repoCodeContext: repoCodeContext || undefined,
     });
 
-
-    // Map architect output to the existing GeneratedTask format
-    const generatedTasks: GeneratedTask[] = architectResult.tasks.map((t, generationIndex) => ({
-      title: t.title,
-      description: t.description,
-      priority: t.priority,
-      storyPoints: t.storyPoints,
-      tags: t.tags,
-      dependsOnTaskIndices: t.dependsOnTaskIndices,
+    const generatedTasks: GeneratedTask[] = architectResult.tasks.map((task, generationIndex) => ({
+      title: task.title,
+      description: task.description,
+      priority: task.priority,
+      storyPoints: task.storyPoints,
+      tags: task.tags,
+      dependsOnTaskIndices: task.dependsOnTaskIndices,
       generationIndex,
     }));
 
@@ -124,13 +132,12 @@ export async function generateTasks(
         actualOutput: JSON.stringify(result),
         latencyMs: Date.now() - generationStartedAt,
         model: process.env.AI_PROVIDER || 'configured-provider',
-        notes: 'Automatically captured; task quality and duplicate checks are pending review.',
+        notes: 'Synchronous Architect Agent evaluation sample; quality scores are pending review.',
       });
     } catch (evaluationError) {
       console.warn('Failed to record architect evaluation sample:', evaluationError);
     }
 
-    // Persist the generation record
     await saveGeneration({
       projectId: request.projectId,
       userId: user.id,

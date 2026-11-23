@@ -4,6 +4,10 @@ const globalForRedis = globalThis as unknown as {
   nexusRedisConnection?: IORedis;
 };
 
+export function createQueueJobId(prefix: string, ...parts: string[]): string {
+  return [prefix, ...parts].join('-').replace(/:/g, '-');
+}
+
 export function getRedisUrl(): string {
   return process.env.REDIS_URL || 'redis://127.0.0.1:6379';
 }

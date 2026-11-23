@@ -44,15 +44,15 @@ export async function retrieveRelevantTasks(
     });
   }
 
-  const results = await client.search(COLLECTION_NAME, {
-    vector: queryVector,
+  const response = await client.query(COLLECTION_NAME, {
+    query: queryVector,
     limit: topK,
     filter: { must: mustConditions },
     with_payload: true,
     score_threshold: 0.3,
   });
 
-  return results.map((r) => ({
+  return response.points.map((r) => ({
     taskId: r.payload?.task_id as string,
     title: r.payload?.title as string,
     description: r.payload?.description as string,

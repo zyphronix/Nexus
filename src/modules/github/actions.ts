@@ -5,10 +5,10 @@ import { githubConnections, githubTaskMatches, tasks } from '@/core/db/schema';
 import { and, desc, eq } from 'drizzle-orm';
 import { getAuthUser, requireRole } from '@/core/auth';
 import { createOctokit } from './lib/octokit';
-import { indexRepo } from './lib/indexer';
 import { matchCommitToTasks } from './lib/commit-matcher';
 import { deleteAllCodeChunks } from '@/modules/rag/code-sync';
 import { updateTask } from '@/core/db/queries/tasks';
+import { enqueueFullGitHubIndex } from './queue';
 import {
   createIndexingJob,
   getIndexingJobById,
@@ -161,8 +161,26 @@ export async function selectRepo(
       })
       .where(eq(githubConnections.projectId, projectId));
 
-    // Initial index
-    const indexResult = await indexRepo(projectId);
+    // Queue initial full index after the repository connection is saved.
+    const initialIndexJob = await createIndexingJob({
+      projectId,
+      jobType: 'initial_full',
+      commitSha: repo.default_branch,
+    });
+    try {
+      await enqueueFullGitHubIndex({
+        kind: 'full-index',
+        projectId,
+        indexingJobId: initialIndexJob.id,
+      });
+    } catch (error) {
+      await updateIndexingJob(initialIndexJob.id, {
+        status: 'failed',
+        errorMessage: error instanceof Error ? error.message : 'Failed to queue initial indexing',
+        completedAt: new Date(),
+      });
+      console.warn('[github] Initial repository indexing could not be queued:', error);
+    }
 
     // Backfill: scan recent commits and AI-match
     let tasksAutoClosed = 0;
@@ -229,8 +247,8 @@ export async function selectRepo(
     return {
       success: true,
       data: {
-        filesIndexed: indexResult.filesIndexed,
-        chunksIndexed: indexResult.chunksIndexed,
+        filesIndexed: 0,
+        chunksIndexed: 0,
         tasksAutoClosed,
       },
     };
@@ -278,34 +296,26 @@ export async function disconnectGithub(
 
 export async function triggerReindex(
   projectId: string
-): Promise<ApiResponse<{ filesIndexed: number; chunksIndexed: number }>> {
+): Promise<ApiResponse<{ jobId: string }>> {
   try {
     const user = await getAuthUser();
     await requireRole(user.id, projectId, 'admin');
     const job = await createIndexingJob({ projectId, jobType: 'manual_full' });
-    await updateIndexingJob(job.id, { status: 'running', startedAt: new Date() });
-    let result;
     try {
-      result = await indexRepo(projectId);
-      await updateIndexingJob(job.id, {
-        status: 'completed',
-        totalFiles: result.filesIndexed + result.filesSkipped,
-        processedFiles: result.filesIndexed,
-        failedFiles: result.filesSkipped,
-        completedAt: new Date(),
+      await enqueueFullGitHubIndex({
+        kind: 'full-index',
+        projectId,
+        indexingJobId: job.id,
       });
+      return { success: true, data: { jobId: job.id } };
     } catch (error) {
       await updateIndexingJob(job.id, {
         status: 'failed',
-        errorMessage: error instanceof Error ? error.message : 'Reindex failed',
+        errorMessage: error instanceof Error ? error.message : 'Failed to queue indexing job',
         completedAt: new Date(),
       });
       throw error;
     }
-    return {
-      success: true,
-      data: { filesIndexed: result.filesIndexed, chunksIndexed: result.chunksIndexed },
-    };
   } catch (error) {
     console.error('Failed to reindex:', error);
     const message = error instanceof Error ? error.message : 'Reindex failed';
@@ -328,7 +338,7 @@ export async function getIndexingJobHistory(
 
 export async function retryIndexingJob(
   jobId: string,
-): Promise<ApiResponse<{ filesIndexed: number; chunksIndexed: number }>> {
+): Promise<ApiResponse<{ jobId: string }>> {
   try {
     const user = await getAuthUser();
     const job = await getIndexingJobById(jobId);
@@ -342,19 +352,16 @@ export async function retryIndexingJob(
       completedAt: null,
     });
     try {
-      const result = await indexRepo(job.projectId);
-      await updateIndexingJob(job.id, {
-        status: 'completed',
-        totalFiles: result.filesIndexed + result.filesSkipped,
-        processedFiles: result.filesIndexed,
-        failedFiles: result.filesSkipped,
-        completedAt: new Date(),
+      await enqueueFullGitHubIndex({
+        kind: 'full-index',
+        projectId: job.projectId,
+        indexingJobId: job.id,
       });
-      return { success: true, data: { filesIndexed: result.filesIndexed, chunksIndexed: result.chunksIndexed } };
+      return { success: true, data: { jobId: job.id } };
     } catch (error) {
       await updateIndexingJob(job.id, {
         status: 'failed',
-        errorMessage: error instanceof Error ? error.message : 'Retry failed',
+        errorMessage: error instanceof Error ? error.message : 'Failed to queue indexing retry',
         completedAt: new Date(),
       });
       throw error;

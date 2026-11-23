@@ -33,7 +33,7 @@ export function RepoPicker({ projectId, onSelected }: Props) {
       const res = await selectRepo(projectId, repo.owner, repo.name);
       if (res.success && res.data) {
         toast.success(
-          `Indexed ${res.data.filesIndexed} files (${res.data.chunksIndexed} chunks). ${res.data.tasksAutoClosed} tasks auto-closed from recent commits.`
+          `Repository connected. Full indexing queued. ${res.data.tasksAutoClosed} tasks auto-closed from recent commits.`
         );
         onSelected();
       } else {

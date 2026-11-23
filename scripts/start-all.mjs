@@ -11,6 +11,7 @@ config({ path: resolve(root, '.env') });
 
 const QDRANT_URL = process.env.QDRANT_URL || 'http://localhost:6333';
 const APP_URL = process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000';
+const REDIS_URL = process.env.REDIS_URL || 'redis://127.0.0.1:6379';
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -81,7 +82,25 @@ async function preflight() {
     log('err', 'RAG features will not work. Check QDRANT_URL and QDRANT_API_KEY in .env');
   }
 
-  // 3. Check AI provider
+  // 3. Check Redis
+  log('app', `Checking Redis at ${REDIS_URL}...`);
+  try {
+    const { default: IORedis } = await import('ioredis');
+    const redis = new IORedis(REDIS_URL, {
+      maxRetriesPerRequest: null,
+      enableReadyCheck: false,
+      lazyConnect: true,
+    });
+    await redis.connect();
+    await redis.ping();
+    await redis.quit();
+    log('ok', 'Redis connected');
+  } catch (e) {
+    log('err', `Redis connection failed: ${e.message}`);
+    log('err', 'Queue features will not run. Set REDIS_URL or start a Redis server.');
+  }
+
+  // 4. Check AI provider
   const provider = process.env.AI_PROVIDER || 'openai';
   const keyMap = { gemini: 'GEMINI_API_KEY', openai: 'OPENAI_API_KEY', anthropic: 'ANTHROPIC_API_KEY' };
   const key = process.env[keyMap[provider]];
@@ -107,7 +126,10 @@ async function main() {
 
   console.log('');
 
-  // Start Next.js dev server
+  // Start BullMQ worker and Next.js dev server
+  log('app', 'Starting GitHub queue worker...');
+  const worker = runProcess('npx', ['tsx', 'scripts/github-worker.ts'], 'app');
+
   log('app', 'Starting Next.js dev server...');
   const app = runProcess('npx', ['next', 'dev'], 'app');
 
@@ -142,6 +164,7 @@ async function main() {
   // Handle shutdown
   const cleanup = () => {
     log('app', 'Shutting down...');
+    worker.kill();
     app.kill();
     process.exit(0);
   };

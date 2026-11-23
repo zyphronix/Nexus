@@ -438,8 +438,12 @@ completed / failed status
 - Error message
 - Start/completion time
 
-### Operational improvements
+### BullMQ operational improvements
 
+- GitHub pushes and manual reindex actions enqueue durable BullMQ jobs.
+- Redis stores the queue and retry state.
+- A separate TypeScript worker performs GitHub and Qdrant work.
+- Jobs retry automatically with exponential backoff.
 - Manual reindex creates a job record.
 - Webhook reindex creates a job record.
 - Failed jobs can be retried.
@@ -448,6 +452,12 @@ completed / failed status
 ### Code reindex flow
 
 ```text
+Webhook or UI action
+    ↓
+BullMQ job in Redis
+    ↓
+GitHub worker
+    ↓
 Changed file
     ↓
 Fetch from GitHub
@@ -517,7 +527,73 @@ The Insights page reports:
 
 ---
 
-## Slide 15: Results, Validation, and Future Work
+## Slide 15: Redis and BullMQ Architecture
+
+### Queue architecture
+
+```text
+GitHub webhook or Settings UI
+            ↓
+Create indexing_jobs record
+            ↓
+Typed BullMQ job
+            ↓
+Upstash Redis / Redis TLS
+            ↓
+GitHub worker process
+            ↓
+GitHub API + Qdrant + PostgreSQL
+```
+
+### Redis configuration
+
+- Hosted Upstash Redis over `rediss://`
+- Shared IORedis connection
+- Queue name: `github-indexing`
+- Job retry: 3 attempts
+- Exponential backoff: starting at 5 seconds
+- Worker concurrency: 2
+
+### Key implementation files
+
+- `src/core/queue/redis.ts`
+- `src/modules/github/queue.ts`
+- `scripts/github-worker.ts`
+- `src/app/api/webhooks/github/route.ts`
+- `src/modules/github/actions.ts`
+
+---
+
+## Slide 16: Redis and Queue Verification
+
+### Verification layers
+
+1. Redis ping returns `PONG`.
+2. A BullMQ smoke job is added successfully.
+3. Worker reports `[github-worker] Ready`.
+4. GitHub reindex creates `queued` job state.
+5. Worker changes it to `running` and then `completed` or `failed`.
+6. Worker and BullMQ logs show completion or retry details.
+
+### Commands
+
+```bash
+npm run queue:worker
+npm run dev
+npm run start:all
+```
+
+### Presentation evidence
+
+- Worker-ready terminal screenshot
+- Redis PING/PONG output
+- BullMQ queued-job smoke test
+- Indexing history in GitHub settings
+- PostgreSQL `indexing_jobs` status transitions
+
+---
+
+## Slide 17: Results, Validation, and Future Work
 
 ### Current implementation results
 
@@ -528,7 +604,8 @@ The Insights page reports:
 - Webhook replay protection
 - Durable indexing job history and retry
 - AI evaluation records and dashboard
-- 7 automated tests passing
+- BullMQ Redis queue and worker operational
+- 9 automated tests passing
 - TypeScript validation passing
 - Drizzle migration checks passing
 - Webpack production build passing
@@ -537,7 +614,8 @@ The Insights page reports:
 
 - Evaluation scores require human labels or benchmark data.
 - The graph is functional but not yet a full drag-and-drop graph editor.
-- Indexing jobs are durable records with retry, not a separate queue worker system.
+- Queue monitoring can still be improved with Bull Board or another visual dashboard.
+- Redis and worker availability must remain configured in every deployed environment.
 - GitHub token encryption at rest remains future hardening work.
 - External services are required for full runtime behavior.
 
@@ -548,7 +626,7 @@ The Insights page reports:
 - PR-level intelligence
 - Encrypted GitHub tokens
 - Benchmark dataset and precision/recall evaluation
-- Queue-backed indexing workers
+- Bull Board/BullMQ dashboard
 - Production deployment and observability dashboards
 
 ### Final takeaway

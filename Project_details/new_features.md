@@ -707,6 +707,157 @@ These tests cover high-risk pure logic without requiring live external services.
 
 ---
 
+# 12A. New Infrastructure: BullMQ GitHub Processing Queue
+
+## 12A.1 Why a queue was added
+
+The earlier webhook and reindex implementation used Next.js deferred work. That was useful for development but did not provide durable queue state or automatic retry for failures.
+
+The new implementation uses BullMQ with Redis.
+
+## 12A.2 Queue architecture
+
+```text
+GitHub or Settings UI
+          ↓
+Create indexing_jobs record
+          ↓
+Enqueue typed BullMQ job
+          ↓
+Redis
+          ↓
+Separate GitHub worker process
+          ↓
+GitHub API / Qdrant / PostgreSQL
+```
+
+## 12A.3 Supported jobs
+
+- `github-push`: process a GitHub push delivery
+- `github-full-index`: perform a complete repository index
+
+Both job types reference the same `indexing_jobs` row, allowing the database and UI to show queue progress.
+
+## 12A.4 Retry policy
+
+BullMQ is configured with:
+
+- 3 attempts
+- Exponential backoff starting at 5 seconds
+- 100 completed jobs retained
+- 200 failed jobs retained
+- 2 concurrent worker operations
+
+## 12A.5 Worker behavior
+
+The worker:
+
+1. Marks the indexing job as `running`.
+2. Processes changed, added, or removed files.
+3. Reindexes code chunks in Qdrant.
+4. Runs commit-to-task matching.
+5. Persists auto-close or pending-match decisions.
+6. Marks the indexing job and webhook delivery as completed or failed.
+
+## 12A.6 Runtime setup
+
+The queue worker starts with:
+
+```bash
+npm run queue:worker
+```
+
+The combined development startup also attempts to start the worker:
+
+```bash
+npm run start:all
+```
+
+Redis is selected with:
+
+```dotenv
+REDIS_URL=redis://127.0.0.1:6379
+```
+
+The URL can be replaced with a hosted Redis or Upstash-compatible Redis URL.
+
+## 12A.7 Verification and operations
+
+Redis and BullMQ are usable in four verification layers:
+
+### Connection verification
+
+Use a short script or the combined startup preflight to confirm that `REDIS_URL` accepts a TLS connection and returns `PONG`:
+
+```bash
+npx tsx -e "import IORedis from 'ioredis'; import 'dotenv/config'; const r=new IORedis(process.env.REDIS_URL!,{maxRetriesPerRequest:1,connectTimeout:10000}); r.ping().then(v=>{console.log(v);r.quit()}).catch(e=>{console.error(e.message);process.exit(1)})"
+```
+
+Expected result:
+
+```text
+PONG
+```
+
+### Queue smoke verification
+
+Create a temporary BullMQ job and confirm that BullMQ can serialize and write it to Redis:
+
+```bash
+npx tsx -e "import 'dotenv/config'; import { Queue } from 'bullmq'; import IORedis from 'ioredis'; const c=new IORedis(process.env.REDIS_URL!); const q=new Queue('nexus-smoke-test',{connection:c}); q.add('ping',{ok:true},{removeOnComplete:true}).then(j=>console.log('Queued job:',j.id)).finally(async()=>{await q.close();await c.quit()})"
+```
+
+### Worker verification
+
+Start the worker in a separate terminal:
+
+```bash
+npm run queue:worker
+```
+
+A successful worker reports:
+
+```text
+[github-worker] Ready
+```
+
+The worker logs completed and failed jobs:
+
+```text
+[github-worker] Completed <job-id>
+[github-worker] Failed <job-id>: <error>
+```
+
+### End-to-end verification
+
+To verify the complete queue:
+
+1. Start Redis through the configured hosted provider.
+2. Start the GitHub worker.
+3. Start the Next.js application.
+4. Connect or reindex a GitHub repository.
+5. Confirm a row appears in `indexing_jobs` with `queued` status.
+6. Watch the worker log as the status becomes `running` and then `completed` or `failed`.
+7. Trigger the same GitHub delivery again and confirm webhook replay protection prevents duplicate processing.
+
+BullMQ automatically retries failed queue jobs with exponential backoff. The database record remains the presentation-facing and audit-facing source of truth for final progress.
+
+## 12A.8 Implementation locations
+
+- Redis URL and shared IORedis connection: `src/core/queue/redis.ts`
+- BullMQ queue and typed job definitions: `src/modules/github/queue.ts`
+- GitHub push enqueue: `src/app/api/webhooks/github/route.ts`
+- Manual reindex and retry enqueue: `src/modules/github/actions.ts`
+- Worker processor: `scripts/github-worker.ts`
+- Worker package script: `package.json`
+- Redis startup preflight: `scripts/start-all.mjs`
+- Queue environment setting: `.env`
+- Optional local Redis Compose setup: `compose.redis.yml`
+
+## 12A.9 Presentation benefit
+
+This advancement separates short-lived HTTP requests from long-running repository work. GitHub webhooks now return immediately after queue insertion, while a worker provides durable retries and processing isolation.
+
 # 13. Database Evolution
 
 The original project had 13 relational tables. The current schema includes additional tables for the new features:
@@ -774,11 +925,11 @@ AI outputs and latency are recorded for evaluation
 The project is substantially more complete, but these points should be stated accurately:
 
 - The dependency graph is functional but currently a level-based visualization rather than a full drag-and-drop graph editor.
-- Durable indexing records and retry actions exist, but a separate external worker queue is not yet used.
+- BullMQ queue monitoring could be enhanced with Bull Board or a dedicated operations dashboard.
 - AI evaluation samples are captured automatically, but reliable scores still require human labels or a benchmark dataset.
 - GitHub access-token encryption at rest is not yet implemented.
 - The build configuration still skips TypeScript and ESLint validation during Next.js production builds, although separate validation commands pass.
-- External services remain required for full runtime behavior: PostgreSQL/Supabase, Qdrant, AI provider credentials, and optional GitHub OAuth.
+- External services remain required for full runtime behavior: PostgreSQL/Supabase, Qdrant, Redis/Upstash, AI provider credentials, and optional GitHub OAuth.
 
 The strongest claim is:
 

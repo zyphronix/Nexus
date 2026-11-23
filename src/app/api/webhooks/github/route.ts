@@ -1,13 +1,10 @@
 import { NextResponse } from 'next/server';
-import { after } from 'next/server';
 import { db } from '@/core/db/client';
-import { githubConnections, githubTaskMatches, githubWebhookEvents } from '@/core/db/schema';
+import { githubConnections, githubWebhookEvents } from '@/core/db/schema';
 import { eq } from 'drizzle-orm';
 import { verifyWebhookSignature } from '@/modules/github/lib/webhook-verify';
-import { reindexChangedFiles } from '@/modules/github/lib/indexer';
-import { matchCommitToTasks } from '@/modules/github/lib/commit-matcher';
-import { updateTask } from '@/core/db/queries/tasks';
 import { createIndexingJob, updateIndexingJob } from '@/core/db/queries';
+import { enqueueGitHubPush } from '@/modules/github/queue';
 
 type PushCommit = {
   id: string;
@@ -100,104 +97,32 @@ export async function POST(request: Request) {
     ),
   });
 
-  // Defer heavy work so the webhook responds quickly
-  after(async () => {
-    let hasFailures = false;
-    let processedFiles = 0;
-    let failedFiles = 0;
-    await updateIndexingJob(indexingJob.id, {
-      status: 'running',
-      startedAt: new Date(),
+  try {
+    await enqueueGitHubPush({
+      kind: 'push',
+      projectId,
+      indexingJobId: indexingJob.id,
+      deliveryId,
+      commits,
+      ownerUserId,
     });
-    try {
-      for (const commit of commits) {
-        const changed = [...(commit.added || []), ...(commit.modified || [])];
-        const removed = commit.removed || [];
-
-        try {
-          await reindexChangedFiles(projectId, changed, removed);
-          processedFiles += changed.length + removed.length;
-        } catch (err) {
-          hasFailures = true;
-          failedFiles += changed.length + removed.length;
-          console.warn(`[github-webhook] reindex failed for ${commit.id}:`, err);
-        }
-
-        try {
-          const matched = await matchCommitToTasks({
-            projectId,
-            commitMessage: commit.message,
-            filesChanged: changed,
-          });
-          for (const match of matched) {
-            try {
-              if (match.confidence >= 0.9) {
-                await updateTask(match.taskId, { status: 'done' }, ownerUserId);
-                await db.insert(githubTaskMatches).values({
-                  id: crypto.randomUUID(),
-                  projectId,
-                  commitSha: commit.id,
-                  taskId: match.taskId,
-                  confidence: Math.round(match.confidence * 100),
-                  reason: match.reason,
-                  status: 'auto_closed',
-                  reviewedAt: new Date(),
-                });
-                console.info(
-                  `[github-webhook] auto-closed task ${match.taskId} from commit ${commit.id}`
-                );
-              } else {
-                await db.insert(githubTaskMatches).values({
-                  id: crypto.randomUUID(),
-                  projectId,
-                  commitSha: commit.id,
-                  taskId: match.taskId,
-                  confidence: Math.round(match.confidence * 100),
-                  reason: match.reason,
-                  status: 'pending',
-                });
-              }
-            } catch (err) {
-              hasFailures = true;
-              console.warn(`[github-webhook] failed to persist match for ${match.taskId}:`, err);
-            }
-          }
-        } catch (err) {
-          hasFailures = true;
-          console.warn(`[github-webhook] commit matcher failed for ${commit.id}:`, err);
-        }
-      }
-      await db
-        .update(githubWebhookEvents)
-        .set({
-          status: hasFailures ? 'failed' : 'completed',
-          processedAt: new Date(),
-        })
-        .where(eq(githubWebhookEvents.deliveryId, deliveryId));
-      await updateIndexingJob(indexingJob.id, {
-        status: hasFailures ? 'failed' : 'completed',
-        processedFiles,
-        failedFiles,
-        completedAt: new Date(),
-      });
-    } catch (err) {
-      await updateIndexingJob(indexingJob.id, {
+  } catch (error) {
+    await updateIndexingJob(indexingJob.id, {
+      status: 'failed',
+      errorMessage: error instanceof Error ? error.message : 'Failed to queue webhook job',
+      completedAt: new Date(),
+    });
+    await db
+      .update(githubWebhookEvents)
+      .set({
         status: 'failed',
-        processedFiles,
-        failedFiles,
-        errorMessage: err instanceof Error ? err.message : 'Indexing job failed',
-        completedAt: new Date(),
-      });
-      await db
-        .update(githubWebhookEvents)
-        .set({
-          status: 'failed',
-          errorMessage: err instanceof Error ? err.message : 'Webhook processing failed',
-          processedAt: new Date(),
-        })
-        .where(eq(githubWebhookEvents.deliveryId, deliveryId));
-    }
-  });
+        errorMessage: error instanceof Error ? error.message : 'Failed to queue webhook job',
+        processedAt: new Date(),
+      })
+      .where(eq(githubWebhookEvents.deliveryId, deliveryId));
 
-  return NextResponse.json({ ok: true, commits: commits.length });
+    return NextResponse.json({ error: 'Queue unavailable' }, { status: 503 });
+  }
+
+  return NextResponse.json({ ok: true, queued: true, commits: commits.length });
 }

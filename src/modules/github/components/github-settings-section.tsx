@@ -46,6 +46,15 @@ export function GithubSettingsSection({ projectId }: Props) {
     refresh();
   }, [refresh]);
 
+  useEffect(() => {
+    const hasActiveJob = jobs.some((job) => job.status === 'queued' || job.status === 'running');
+    if (!hasActiveJob) return;
+    const interval = window.setInterval(() => {
+      refresh();
+    }, 3000);
+    return () => window.clearInterval(interval);
+  }, [jobs, refresh]);
+
   function handleConnect() {
     window.location.href = `/api/auth/github/start?projectId=${projectId}`;
   }
@@ -68,7 +77,7 @@ export function GithubSettingsSection({ projectId }: Props) {
       toast.info('Reindexing repository...');
       const res = await triggerReindex(projectId);
       if (res.success && res.data) {
-        toast.success(`Reindexed ${res.data.filesIndexed} files (${res.data.chunksIndexed} chunks)`);
+        toast.success('Full reindex queued. Watch indexing history for progress.');
         refresh();
       } else {
         toast.error(res.error || 'Reindex failed');
